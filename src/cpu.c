@@ -4,6 +4,89 @@
 
 #include "gb.h"
 
+void RegisterReset(CPU *cpu) {
+    cpu->sp = 0xfffe;
+    cpu->a  = 0;
+    cpu->b  = 0;
+    cpu->c  = 0;
+    cpu->d  = 0;
+    cpu->e  = 0;
+    cpu->h  = 0;
+    cpu->l  = 0;
+
+    cpu->f_z = false;
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = false;
+}
+
+uint8_t RegisterINC(CPU *cpu, uint8_t value) {
+    uint8_t r = (value + 1) & 0xff;
+    cpu->f_z = (r == 0);
+    cpu->f_n = false;
+    cpu->f_h = ((value & 0xf) == 0xf);
+    return r;
+}
+
+uint8_t RegisterDEC(CPU *cpu, uint8_t value) {
+    uint8_t r = (value - 1) & 0xff;
+    cpu->f_z = (r == 0);
+    cpu->f_n = true;
+    cpu->f_h = ((value & 0xf) == 0);
+    return r;
+}
+
+uint16_t RegisterAdd16(CPU *cpu, uint16_t a, uint16_t b) {
+    uint32_t wa = a;
+    uint32_t wb = b;
+    uint32_t r = a + b;
+
+    cpu->f_n = false;
+    cpu->f_c = r & 0x10000;
+    cpu->f_h = (wa ^ wb ^ r) & 0x1000;
+    return r;
+}
+
+void RegisterRLCA(CPU *cpu) {
+     uint8_t a = cpu->a;
+     uint8_t c;
+
+     c = a >> 7;
+     a = (a << 1) & 0xff;
+     a |= c;
+
+     cpu->a = a;
+
+     cpu->f_z = false;
+     cpu->f_n = false;
+     cpu->f_h = false;
+     cpu->f_c = c;
+}
+
+void RegisterHLAdd16(CPU *cpu, uint16_t value) {
+    uint32_t wa = (uint32_t)cpu->hl;
+    uint32_t wb = (uint32_t)value;
+    uint32_t r = wa + wb;
+
+    cpu->f_n = false;
+    cpu->f_c = r & 0x10000;
+    cpu->f_h = (wa ^ wb ^ r) & 0x1000;
+    cpu->hl = (uint16_t)r;
+}
+
+uint16_t *RegisterDecodeR16(CPU *cpu, uint8_t id) {
+    switch (id) {
+        case 0b00000000:
+            return &cpu->bc;
+        case 0b00010000:
+            return &cpu->de;
+        case 0b00100000:
+            return &cpu->hl;
+        default: //0b00110000
+            return &cpu->sp;
+    }
+}
+
 void gb_cpu_reset(struct gb *gb) {
      struct gb_cpu *cpu = &gb->cpu;
 
@@ -12,19 +95,7 @@ void gb_cpu_reset(struct gb *gb) {
 
      cpu->halted = false;
 
-     cpu->sp = 0xfffe;
-     cpu->a  = 0;
-     cpu->b  = 0;
-     cpu->c  = 0;
-     cpu->d  = 0;
-     cpu->e  = 0;
-     cpu->h  = 0;
-     cpu->l  = 0;
-
-     cpu->f_z = false;
-     cpu->f_n = false;
-     cpu->f_h = false;
-     cpu->f_c = false;
+    RegisterReset(cpu);
 
      /* XXX For the time being we don't emulate the BOOTROM so we start the
       * execution just past it */
@@ -36,7 +107,6 @@ void gb_cpu_reset(struct gb *gb) {
            */
           cpu->a = 0x11;
      }
-
 }
 
 static inline void gb_cpu_clock_tick(struct gb *gb, int32_t cycles) {
@@ -48,104 +118,11 @@ static inline void gb_cpu_clock_tick(struct gb *gb, int32_t cycles) {
      }
 }
 
-static uint8_t gb_cpu_readb(struct gb *gb, uint16_t addr) {
-     uint8_t b = gb_memory_readb(gb, addr);
-
-     gb_cpu_clock_tick(gb, 4);
-
-     return b;
-}
-
-static void gb_cpu_writeb(struct gb *gb, uint16_t addr, uint8_t val) {
-     gb_memory_writeb(gb, addr, val);
-
-     gb_cpu_clock_tick(gb, 4);
-}
-
-static void gb_cpu_load_pc(struct gb *gb, uint16_t new_pc) {
-     gb->cpu.pc = new_pc;
-
-     gb_cpu_clock_tick(gb, 4);
-}
-
-static void gb_cpu_pushb(struct gb *gb, uint8_t b) {
-     struct gb_cpu *cpu = &gb->cpu;
-
-     cpu->sp = (cpu->sp - 1) & 0xffff;
-
-     gb_cpu_writeb(gb, cpu->sp, b);
-}
-
-static uint8_t gb_cpu_popb(struct gb *gb) {
-     struct gb_cpu *cpu = &gb->cpu;
-
-     uint8_t b = gb_cpu_readb(gb, cpu->sp);
-
-     cpu->sp = (cpu->sp + 1) & 0xffff;
-
-     return b;
-}
-
-static void gb_cpu_pushw(struct gb *gb, uint16_t w) {
-     gb_cpu_pushb(gb, w >> 8);
-     gb_cpu_pushb(gb, w & 0xff);
-}
-
-static uint16_t gb_cpu_popw(struct gb *gb) {
-     uint16_t b0 = gb_cpu_popb(gb);
-     uint16_t b1 = gb_cpu_popb(gb);
-
-     return b0 | (b1 << 8);
-}
-
-static uint8_t gb_cpu_next_i8(struct gb *gb) {
-     struct gb_cpu *cpu = &gb->cpu;
-
-     uint8_t i8 = gb_cpu_readb(gb, cpu->pc);
-
-     cpu->pc = (cpu->pc + 1) & 0xffff;
-
-     return i8;
-}
-
-static uint16_t gb_cpu_next_i16(struct gb *gb) {
-     uint16_t b0 = gb_cpu_next_i8(gb);
-     uint16_t b1 = gb_cpu_next_i8(gb);
-
-     return b0 | (b1 << 8);
-}
-
 /****************
  * Instructions *
  ****************/
 
 typedef void (*gb_instruction_f)(struct gb *);
-
-static void gb_i_stop(struct gb *gb) {
-     if (gb->speed_switch_pending) {
-          /* If a speed change has been requested it is executed on STOP and the
-           * execution resumes normally after that. */
-          /* XXX: this should take about 16ms when switching to double-speed
-           * mode and about 32ms when switching back to normal mode */
-
-          /* Clock speed is going to change, synchronize the relevant devices
-           * with the current clock speed */
-          gb_timer_sync(gb);
-          gb_dma_sync(gb);
-
-          gb->double_speed = !gb->double_speed;
-
-          /* Re-sync with new prediction */
-          gb_timer_sync(gb);
-          gb_dma_sync(gb);
-
-          return;
-     }
-
-     // XXX TODO: stop CPU and screen until button press
-     fprintf(stderr, "Implement STOP!\n");
-     die();
-}
 
 /* Addresses of the interrupt handlers in memory */
 static const uint16_t gb_irq_handlers[5] = {
@@ -156,66 +133,20 @@ static const uint16_t gb_irq_handlers[5] = {
      [GB_IRQ_INPUT]    = 0x0060
 };
 
-static void gb_cpu_check_interrupts(struct gb *gb) {
-     struct gb_cpu *cpu = &gb->cpu;
-     struct gb_irq *irq = &gb->irq;
-     uint8_t active_irq;
-     uint16_t handler;
-     unsigned i;
-
-     /* See if we have an interrupt pending */
-     active_irq = irq->irq_enable & irq->irq_flags & 0x1f;
-
-     if (!active_irq) {
-          return;
-     }
-
-     /* We have an active IRQ, that gets us outside of halted mode even if the
-      * IME is not set in the CPU */
-     cpu->halted = false;
-
-     if (!cpu->irq_enable) {
-          /* IME is not set, nothing to do */
-          return;
-     }
-
-     /* Find the first active IRQ. The order is significant, IRQs with a lower
-      * number have the priority. */
-     for (i = 0; i < 5; i++) {
-          if (active_irq & (1U << i)) {
-               break;
-          }
-     }
-
-     /* That shouldn't happen since we check if we have an active IRQ above */
-     assert(i < 5);
-
-     handler = gb_irq_handlers[i];
-
-     cpu->irq_enable = false;
-     cpu->irq_enable_next = false;
-
-     /* Entering Interrupt context takes 12 cycles */
-     gb_cpu_clock_tick(gb, 12);
-
-     /* Push current PC on the stack */
-     gb_cpu_pushw(gb, gb->cpu.pc);
-
-     /* We're about to handle this interrupt, acknowledge it */
-     irq->irq_flags &= ~(1U << i);
-
-     /* Jump to the IRQ handler */
-     gb_cpu_load_pc(gb, handler);
+// Update
+void CPUTick(CPU *cpu, unsigned int tick) {
+    gb_cpu_clock_tick(cpu->memory, tick);
 }
 
-
-// Update
 uint8_t MemoryRead(Memory *memory, uint16_t address) {
-    return gb_cpu_readb(memory, address);
+    uint8_t b = gb_memory_readb(memory, address);
+    gb_cpu_clock_tick(memory, 4);
+    return b;
 }
 
 void MemoryWrite(Memory *memory, uint16_t address, uint8_t value) {
-    gb_cpu_writeb(memory, address, value);
+    gb_memory_writeb(memory, address, value);
+    gb_cpu_clock_tick(memory, 4);
 }
 
 uint8_t CPUReadNextI8(CPU *cpu) {
@@ -239,40 +170,6 @@ void CPUMemoryWriteI16(CPU *cpu, uint16_t address, uint16_t value) {
     MemoryWrite(cpu->memory, address + 1, (uint8_t)((value >> 8) & 0xff));
 }
 
-void CPUTick(CPU *cpu, unsigned int tick) {
-    gb_cpu_clock_tick(cpu->memory, tick);
-}
-
-uint8_t CPU_INC(CPU *cpu, uint8_t v) {
-    uint8_t r = (v + 1) & 0xff;
-    cpu->f_z = (r == 0);
-    cpu->f_n = false;
-    cpu->f_h = ((v & 0xf) == 0xf);
-    return r;
-}
-
-uint8_t CPU_DEC(CPU *cpu, uint8_t v) {
-    uint8_t r = (v - 1) & 0xff;
-    cpu->f_z = (r == 0);
-    cpu->f_n = true;
-    cpu->f_h = ((v & 0xf) == 0);
-    return r;
-}
-
-uint16_t CPU_ADDW_SET_FLAGS(CPU *cpu, uint16_t a, uint16_t b) {
-    uint32_t wa = a;
-    uint32_t wb = b;
-    uint32_t r = a + b;
-
-    cpu->f_n = false;
-    cpu->f_c = r & 0x10000;
-    cpu->f_h = (wa ^ wb ^ r) & 0x1000;
-
-    CPUTick(cpu, 4);
-
-    return r;
-}
-
 void CPU_LOAD_PC(CPU *cpu, uint16_t pc) {
     cpu->pc = pc;
     CPUTick(cpu, 4);
@@ -280,190 +177,7 @@ void CPU_LOAD_PC(CPU *cpu, uint16_t pc) {
 
 static CPUInstruction cpuInstructions[0x100];
 
-void NOP(CPU *cpu) { };
-
-void LD_BC_i16(CPU *cpu) {
-    cpu->bc = CPUReadNextI16(cpu);
-}
-
-void LD_MBC_A(CPU *cpu) {
-    MemoryWrite(cpu->memory, cpu->bc, cpu->a);
-}
-
-void INC_BC(CPU *cpu) {
-    cpu->bc = (cpu->bc + 1) & 0xffff;
-    CPUTick(cpu, 4);
-}
-
-void INC_B(CPU *cpu) {
-    cpu->b = CPU_INC(cpu, cpu->b);
-}
-
-void DEC_B(CPU *cpu) {
-    cpu->b = CPU_DEC(cpu, cpu->b);
-}
-
-void LD_B_i8(CPU *cpu) {
-    cpu->b = CPUReadNextI8(cpu);
-}
-
-void RLC_A(CPU *cpu) {
-     uint8_t a = cpu->a;
-     uint8_t c;
-
-     c = a >> 7;
-     a = (a << 1) & 0xff;
-     a |= c;
-
-     cpu->a = a;
-
-     cpu->f_z = false;
-     cpu->f_n = false;
-     cpu->f_h = false;
-     cpu->f_c = c;
-}
-
-void LD_Mi16_SP(CPU *cpu) {
-    uint16_t i16 = CPUReadNextI16(cpu);
-    MemoryWrite(cpu->memory, i16, cpu->p);
-    MemoryWrite(cpu->memory, i16 + 1, cpu->s);
-}
-
-void ADD_HL_BC(CPU *cpu) {
-    cpu->hl = CPU_ADDW_SET_FLAGS(cpu, cpu->hl, cpu->bc);
-}
-
-void LD_A_MBC(CPU *cpu) {
-    cpu->a = MemoryRead(cpu->memory, cpu->bc); 
-}
-
-void DEC_BC(CPU *cpu) {
-    cpu->bc = (cpu->bc - 1) & 0xffff;
-    CPUTick(cpu, 4);
-}
-
-void INC_C(CPU *cpu) {
-    cpu->c = CPU_INC(cpu, cpu->c);
-}
-
-void DEC_C(CPU *cpu) {
-    cpu->c = CPU_DEC(cpu, cpu->c);
-}
-
-void LD_C_i8(CPU *cpu) {
-    cpu->c = CPUReadNextI8(cpu); 
-}
-
-void RRCA(CPU *cpu) {
-    uint8_t a = cpu->a;
-    uint8_t c;
-
-    c = a & 1;
-    a = a >> 1;
-    a |= (c << 7);
-
-    cpu->a = a;
-
-    cpu->f_z = false;
-    cpu->f_n = false;
-    cpu->f_h = false;
-    cpu->f_c = c;
-}
-
-void STOP(CPU *cpu) {
-    gb_i_stop(cpu->memory);
-}
-
-void LD_DE_i16(CPU *cpu) {
-    cpu->de = CPUReadNextI16(cpu);
-}
-
-void LD_MDE_A(CPU *cpu) {
-    MemoryWrite(cpu->memory, cpu->de, cpu->a);
-}
-
-void INC_DE(CPU *cpu) {
-    cpu->de = (cpu->de + 1) & 0xffff;
-    CPUTick(cpu, 4);
-}
-
-void INC_D(CPU *cpu) {
-    cpu->d = CPU_INC(cpu, cpu->d);
-}
-
-void DEC_D(CPU *cpu) {
-    cpu->d = CPU_DEC(cpu, cpu->d);
-}
-
-void LD_D_i8(CPU *cpu) {
-    cpu->d = CPUReadNextI8(cpu);
-}
-
-void RLA(CPU *cpu) {
-    uint8_t a = cpu->a;
-    uint8_t c = cpu->f_c;
-    uint8_t new_c;
-
-    /* Current carry goes to LSB of A, MSB of A becomes new carry */
-    new_c = a >> 7;
-    a = (a << 1) & 0xff;
-    a |= c;
-
-    cpu->a = a;
-
-    cpu->f_z = false;
-    cpu->f_n = false;
-    cpu->f_h = false;
-    cpu->f_c = new_c;
-}
-
-void JR_Si8(CPU *cpu) {
-    uint8_t i8 = CPUReadNextI8(cpu);
-    CPU_LOAD_PC(cpu, (uint16_t)(cpu->pc + (int8_t)i8));
-}
-
-void ADD_HL_DE(CPU *cpu) {
-    cpu->hl = CPU_ADDW_SET_FLAGS(cpu, cpu->hl, cpu->de);
-}
-
-void LD_A_MDE(CPU *cpu) {
-    cpu->a = MemoryRead(cpu->memory, cpu->de);
-}
-
-void DEC_DE(CPU *cpu) {
-    cpu->de = (cpu->de - 1) & 0xffff;
-    CPUTick(cpu, 4);
-}
-
-void INC_E(CPU *cpu) {
-    cpu->e = CPU_INC(cpu, cpu->e);
-}
-
-void DEC_E(CPU *cpu) {
-    cpu->e = CPU_DEC(cpu, cpu->e);
-}
-
-void LD_E_i8(CPU *cpu) {
-    cpu->e = CPUReadNextI8(cpu);
-}
-
-void RRA(CPU *cpu) {
-    uint8_t a = cpu->a;
-    uint8_t c = cpu->f_c;
-    uint8_t new_c;
-
-    /* Current carry goes to MSB of A, LSB of A becomes new carry */
-    new_c = a & 1;
-    a = a >> 1;
-    a |= (c << 7);
-
-    cpu->a = a;
-
-    cpu->f_z = false;
-    cpu->f_n = false;
-    cpu->f_h = false;
-    cpu->f_c = new_c;
-}
+void NOP(CPU *) { };
 
 static size_t opcode = 0x00;
 
@@ -578,42 +292,43 @@ void DEC_R16(CPU *cpu) {
 
 void ADD_HL_R16(CPU *cpu) {
     uint16_t *r16 = DecodeR16(cpu);
-    cpu->hl = CPU_ADDW_SET_FLAGS(cpu, cpu->hl, *r16);
+    RegisterHLAdd16(cpu, *r16);
+    CPUTick(cpu, 4);
 }
 
 void INC_R8(CPU *cpu) {
-    uint8_t *r8 = DecodeR8(cpu);
-    if (r8) {
-        uint8_t value = CPU_INC(cpu, *r8);
-        *r8 = value;
+    if (((opcode >> 3) & 0b00000111) == 0b00000110) {
+        uint8_t value = MemoryRead(cpu->memory, cpu->hl);
+        value = RegisterINC(cpu, value);
+        MemoryWrite(cpu->memory, cpu->hl, value);
     }
     else {
-        uint8_t value = MemoryRead(cpu->memory, cpu->hl);
-        value = CPU_INC(cpu, value);
-        MemoryWrite(cpu->memory, cpu->hl, value);
+        uint8_t *r8 = DecodeR8(cpu);
+        uint8_t value = RegisterINC(cpu, *r8);
+        *r8 = value;
     }
 }
 
 void DEC_R8(CPU *cpu) {
-    uint8_t *r8 = DecodeR8(cpu);
-    if (r8) {
-        uint8_t value = CPU_DEC(cpu, *r8);
-        *r8 = value;
+    if (((opcode >> 3) & 0b00000111) == 0b00000110) {
+        uint8_t value = MemoryRead(cpu->memory, cpu->hl);
+        value = RegisterDEC(cpu, value);
+        MemoryWrite(cpu->memory, cpu->hl, value);
     }
     else {
-        uint8_t value = MemoryRead(cpu->memory, cpu->hl);
-        value = CPU_DEC(cpu, value);
-        MemoryWrite(cpu->memory, cpu->hl, value);
+        uint8_t *r8 = DecodeR8(cpu);
+        uint8_t value = RegisterDEC(cpu, *r8);
+        *r8 = value;
     }
 }
 
 void LD_R8_IMM8(CPU *cpu) {
-    uint8_t *r8 = DecodeR8(cpu);
-    if (r8) {
-        *r8 = CPUReadNextI8(cpu);
+    if (((opcode >> 3) & 0b00000111) == 0b00000110) {
+        MemoryWrite(cpu->memory, cpu->hl, CPUReadNextI8(cpu));
     }
     else {
-        MemoryWrite(cpu->memory, cpu->hl, CPUReadNextI8(cpu));
+        uint8_t *r8 = DecodeR8(cpu);
+        *r8 = CPUReadNextI8(cpu);
     }
 }
 
@@ -626,7 +341,6 @@ void CPURLCA(CPU *cpu) {
      a |= c;
 
      cpu->a = a;
-
      cpu->f_z = false;
      cpu->f_n = false;
      cpu->f_h = false;
@@ -642,7 +356,6 @@ void CPURRCA(CPU *cpu) {
      a |= (c << 7);
 
      cpu->a = a;
-
      cpu->f_z = false;
      cpu->f_n = false;
      cpu->f_h = false;
@@ -660,7 +373,6 @@ void CPURLA(CPU *cpu) {
      a |= c;
 
      cpu->a = a;
-
      cpu->f_z = false;
      cpu->f_n = false;
      cpu->f_h = false;
@@ -678,7 +390,6 @@ void CPURRA(CPU *cpu) {
      a |= (c << 7);
 
      cpu->a = a;
-
      cpu->f_z = false;
      cpu->f_n = false;
      cpu->f_h = false;
@@ -730,7 +441,6 @@ void CPUDAA(CPU *cpu) {
 void CPUCPL(CPU *cpu) {
      /* Complement A */
      cpu->a = ~cpu->a;
-
      cpu->f_n = true;
      cpu->f_h = true;
 }
@@ -804,20 +514,21 @@ void CPU_STOP(CPU *cpu) {
 }
 
 void CPU_LD_R8_R8(CPU *cpu) {
-    uint8_t *src = DecodeR8Source(cpu);
     uint8_t value;
-    if (src) {
+    if ((opcode & 0b00000111) == 0b00000110) {
+        value = MemoryRead(cpu->memory, cpu->hl);
+    }
+    else {
+        uint8_t *src = DecodeR8Source(cpu);
         value = *src;
     }
-    else {
-        value = MemoryRead(cpu->memory, cpu->hl);
-    } 
-    uint8_t *dst = DecodeR8(cpu);
-    if (dst) {
-        *dst = value;
+
+    if (((opcode >> 3) & 0b00000111) == 0b00000110) {
+        MemoryWrite(cpu->memory, cpu->hl, value);
     }
     else {
-        MemoryWrite(cpu->memory, cpu->hl, value);
+        uint8_t *dst = DecodeR8(cpu);
+        *dst = value;
     }
 }
 
@@ -1292,19 +1003,15 @@ uint8_t *DecodeCBOperand(CPU *cpu) {
         break;
         case 0b00000110: //HL
             return NULL;
-            /*return &cpu->b;*/
         break;
         default: //case 0b00000111:
             return &cpu->a;
-        /*break;*/
     }
 }
 
 void CPUCBRLCSetFlags(CPU *cpu, uint8_t *v) {
      uint8_t c = *v >> 7;
-
      *v = (*v << 1) | c;
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1313,9 +1020,7 @@ void CPUCBRLCSetFlags(CPU *cpu, uint8_t *v) {
 
 void CPUCBRRCSetFlags(CPU *cpu, uint8_t *v) {
      uint8_t c = *v & 1;
-
      *v = (*v >> 1) | (c << 7);
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1324,9 +1029,7 @@ void CPUCBRRCSetFlags(CPU *cpu, uint8_t *v) {
 
 void CPUCBRLSetFlags(CPU *cpu, uint8_t *v) {
      bool new_c = *v >> 7;
-
      *v = (*v << 1) | (uint8_t)cpu->f_c;
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1336,9 +1039,7 @@ void CPUCBRLSetFlags(CPU *cpu, uint8_t *v) {
 void CPUCBRRSetFlags(CPU *cpu, uint8_t *v) {
      bool new_c = *v & 1;
      uint8_t old_c = cpu->f_c;
-
      *v = (*v >> 1) | (old_c << 7);
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1347,9 +1048,7 @@ void CPUCBRRSetFlags(CPU *cpu, uint8_t *v) {
 
 void CPUCBSLASetFlags(CPU *cpu, uint8_t *v) {
      bool c = *v >> 7;
-
      *v = *v << 1;
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1358,10 +1057,8 @@ void CPUCBSLASetFlags(CPU *cpu, uint8_t *v) {
 
 void CPUCBSRASetFlags(CPU *cpu, uint8_t *v) {
      bool c = *v & 1;
-
      /* Sign-extend */
      *v = (*v >> 1) | (*v & 0x80);
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1370,7 +1067,6 @@ void CPUCBSRASetFlags(CPU *cpu, uint8_t *v) {
 
 void CPUCBSWAPSetFlags(CPU *cpu, uint8_t *v) {
      *v = ((*v << 4) | (*v >> 4)) & 0xff;
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1379,9 +1075,7 @@ void CPUCBSWAPSetFlags(CPU *cpu, uint8_t *v) {
 
 void CPUCBSRLSetFlags(CPU *cpu, uint8_t *v) {
      bool c = *v & 1;
-
      *v = *v >> 1;
-
      cpu->f_z = (*v == 0);
      cpu->f_n = false;
      cpu->f_h = false;
@@ -1429,7 +1123,6 @@ void CPU_CB_R8(CPU *cpu) {
 
 void CPUBitSetFlags(CPU *cpu, uint8_t *v, uint8_t bit) {
      bool set = *v & (1U << bit);
-
      cpu->f_z = !set;
      cpu->f_n = false;
      cpu->f_h = true;
@@ -1657,11 +1350,57 @@ void gb_cpu_init() {
     CPUCBInit();
 }
 
-void gb_cpu_run_instruction(struct gb *gb) {
-    opcode = gb_cpu_next_i8(gb);
-    CPUInstruction instruction = cpuInstructions[opcode];
-    instruction(&gb->cpu);
-    return;
+static void gb_cpu_check_interrupts(struct gb *gb) {
+     struct gb_cpu *cpu = &gb->cpu;
+     struct gb_irq *irq = &gb->irq;
+     uint8_t active_irq;
+     uint16_t handler;
+     unsigned i;
+
+     /* See if we have an interrupt pending */
+     active_irq = irq->irq_enable & irq->irq_flags & 0x1f;
+
+     if (!active_irq) {
+          return;
+     }
+
+     /* We have an active IRQ, that gets us outside of halted mode even if the
+      * IME is not set in the CPU */
+     cpu->halted = false;
+
+     if (!cpu->irq_enable) {
+          /* IME is not set, nothing to do */
+          return;
+     }
+
+     /* Find the first active IRQ. The order is significant, IRQs with a lower
+      * number have the priority. */
+     for (i = 0; i < 5; i++) {
+          if (active_irq & (1U << i)) {
+               break;
+          }
+     }
+
+     /* That shouldn't happen since we check if we have an active IRQ above */
+     assert(i < 5);
+
+     handler = gb_irq_handlers[i];
+
+     cpu->irq_enable = false;
+     cpu->irq_enable_next = false;
+
+     /* Entering Interrupt context takes 12 cycles */
+     gb_cpu_clock_tick(gb, 12);
+
+     /* Push current PC on the stack */
+     /*gb_cpu_pushw(gb, gb->cpu.pc);*/
+    CPU_PUSHW(cpu, cpu->pc);
+
+     /* We're about to handle this interrupt, acknowledge it */
+     irq->irq_flags &= ~(1U << i);
+
+    /* Jump to the IRQ handler */
+    CPU_LOAD_PC(cpu, handler);
 }
 
 int32_t gb_cpu_run_cycles(struct gb *gb, int32_t cycles) {
@@ -1694,7 +1433,9 @@ int32_t gb_cpu_run_cycles(struct gb *gb, int32_t cycles) {
                gb_sync_check_events(gb);
 
           } else {
-               gb_cpu_run_instruction(gb);
+                opcode = CPUReadNextI8(&gb->cpu);
+                CPUInstruction instruction = cpuInstructions[opcode];
+                instruction(&gb->cpu);
           }
      }
 

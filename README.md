@@ -63,3 +63,4 @@ RTC:
     Module thoi gian
 
 Timer
+    Cap nhat thanh gi thoi gian

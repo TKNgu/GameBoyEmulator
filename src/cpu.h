@@ -15,51 +15,51 @@ typedef struct gb_cpu {
      /* True if the CPU is currently halted */
      bool halted;
 
-     union {
-         uint16_t af;
-         struct {
-             uint8_t f;
-             uint8_t a;
-         };
-     };
-     union {
-         uint16_t bc;
-         struct {
-             uint8_t c;
-             uint8_t b;
-         };
-     };
-     union {
-         uint16_t de;
-         struct {
-             uint8_t e;
-             uint8_t d;
-         };
-     };
-     union {
-         uint16_t hl;
-         struct {
-             uint8_t l;
-             uint8_t h;
-         };
-     };
-     union {
-         uint16_t sp;
-         struct {
-             uint8_t p;
-             uint8_t s;
-         };
-     };
-     uint16_t pc;
+    union {
+        uint16_t af;
+        struct {
+            uint8_t f;
+            uint8_t a;
+        };
+    };
+    union {
+        uint16_t bc;
+        struct {
+            uint8_t c;
+            uint8_t b;
+        };
+    };
+    union {
+        uint16_t de;
+        struct {
+            uint8_t e;
+            uint8_t d;
+        };
+    };
+    union {
+        uint16_t hl;
+        struct {
+            uint8_t l;
+            uint8_t h;
+        };
+    };
+    union {
+        uint16_t sp;
+        struct {
+            uint8_t p;
+            uint8_t s;
+        };
+    };
+    uint16_t pc;
 
-     /* Zero flag */
-     bool f_z;
-     /* Substract flag */
-     bool f_n;
-     /* Half-Carry flag */
-     bool f_h;
-     /* Carry flag */
-     bool f_c;
+    /* Zero flag */
+    bool f_z;
+    /* Substract flag */
+    bool f_n;
+    /* Half-Carry flag */
+    bool f_h;
+    /* Carry flag */
+    bool f_c;
 
     Memory *memory;
 
