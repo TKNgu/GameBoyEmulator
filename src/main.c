@@ -1,22 +1,41 @@
+#include <stdint.h>
 #include <stdbool.h>
-#include <stdio.h>
+#include <stdlib.h>
 
 #include "CPU.h"
+#include "MMU.h"
 
-int MemoryRead(uint16_t address, uint8_t *value);
-int MemoryWrite(uint16_t address, uint8_t value);
+void (*intruction[0x100])(struct CPU *, struct Memory *);
 
 int main() {
-  if (InitCPU(MemoryRead, MemoryWrite)) {
-    printf("Error Init CPU\n");
-  }
+    struct CPU *cpu = (struct CPU *)malloc(sizeof(struct CPU));
+    if (!cpu) {
+        return 0;
+    }
+    if (InitCPU(cpu)) {
+        goto RELEASE_CPU;
+    }
+    struct MMU *mmu = (struct MMU *)malloc(sizeof(struct MMU));
+    if (!mmu) {
+        goto RELEASE_CPU;
+    }
+    if (InitMMU(mmu)) {
+        goto RELEASE_MMU;
+    }
 
-  while (!CPUTick()) {
-  }
+    bool isRunning = true;
+    while (isRunning) {
+        if (CPUTick(cpu, mmu)) {
+            isRunning = false;
+        }
+    }
 
-  return 0;
+    ReleaseMMU(mmu);
+
+RELEASE_MMU:
+    free(mmu);
+
+RELEASE_CPU:
+    free(cpu);
+    return 0;
 }
-
-int MemoryRead(uint16_t address, uint8_t *value) { return 0; }
-
-int MemoryWrite(uint16_t address, uint8_t value) { return 0; }
