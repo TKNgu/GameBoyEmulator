@@ -5,8 +5,6 @@
 #include "CPU.h"
 #include "MMU.h"
 
-void (*intruction[0x100])(struct CPU *, struct Memory *);
-
 int main() {
     struct CPU *cpu = (struct CPU *)malloc(sizeof(struct CPU));
     if (!cpu) {
