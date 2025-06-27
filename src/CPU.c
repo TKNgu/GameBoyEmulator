@@ -15,10 +15,21 @@
 #define BLOCK_3 0xc0
 
 uint8_t opcode;
-int (*cpuInstruction[NUM_INSTRUCTION])(struct CPU *, struct MMU *);
+int (*cpuInstructions[NUM_INSTRUCTION])(struct CPU *, struct MMU *);
+size_t tickCount;
+
+int CPUReadI8(struct MMU *mmu, uint16_t addr, uint8_t *value) {
+    tickCount += 4;
+    return MMURead8(mmu, addr, value);
+}
+
+int CPUWriteI8(struct MMU *mmu, uint16_t addr, uint8_t value) {
+    tickCount += 4;
+    return MMUWrite8(mmu, addr, value);
+}
 
 int CPUReadNextI8(struct CPU *cpu, struct MMU *mmu, uint8_t *i8) {
-    if (MMURead8(mmu, cpu->pc, i8)) {
+    if (CPUReadI8(mmu, cpu->pc, i8)) {
         return 1;
     }
     cpu->pc = (cpu->pc + 1) & 0xffff;
@@ -26,10 +37,18 @@ int CPUReadNextI8(struct CPU *cpu, struct MMU *mmu, uint8_t *i8) {
 }
 
 int CPUReadNextI16(struct CPU *cpu, struct MMU *mmu, uint16_t *i16) {
-    if (MMURead16(mmu, cpu->pc, i16)) {
+    uint8_t low;
+    if (CPUReadI8(mmu, cpu->pc, &low)) {
         return 1;
     }
-    cpu->pc = (cpu->pc + 2) & 0xffff;
+    cpu->pc = (cpu->pc + 1) & 0xffff;
+    uint8_t hight;
+    if (CPUReadI8(mmu, cpu->pc, &hight)) {
+        return 1;
+    }
+    cpu->pc = (cpu->pc + 1) & 0xffff;
+    *i16 = hight;
+    *i16 = ((*i16) << 8) | low;
     return 0;
 }
 
@@ -107,6 +126,7 @@ uint16_t *DecodeR16Mem(struct CPU *cpu) {
 }
 
 void RegisterHLAdd16(struct CPU *cpu, uint16_t value) {
+    tickCount += 4;
     uint32_t wa = (uint32_t)cpu->hl;
     uint32_t wb = (uint32_t)value;
     uint32_t r = wa + wb;
@@ -134,7 +154,6 @@ uint8_t RegisterDEC(struct CPU *cpu, uint8_t value) {
 }
 
 int NOP(struct CPU *, struct MMU *) {
-    printf("NOP\n");
     return 0;
 }
 
@@ -145,12 +164,12 @@ int LD_R16_IMM16(struct CPU *cpu, struct MMU *mmu) {
 
 int LD_R16MEM_A(struct CPU *cpu, struct MMU *mmu) {
     uint16_t *r16mem = DecodeR16Mem(cpu);
-    return MMUWrite8(mmu, *r16mem, cpu->a);
+    return CPUWriteI8(mmu, *r16mem, cpu->a);
 }
 
 int LD_A_R16MEM(struct CPU *cpu, struct MMU *mmu) {
     uint16_t *r16mem = DecodeR16Mem(cpu);
-    return MMURead8(mmu, *r16mem, &cpu->a);
+    return CPUReadI8(mmu, *r16mem, &cpu->a);
 }
 
 int LD_IMM16_SP(struct CPU *cpu, struct MMU *mmu) {
@@ -158,10 +177,17 @@ int LD_IMM16_SP(struct CPU *cpu, struct MMU *mmu) {
     if (CPUReadNextI16(cpu, mmu, &imm16)) {
         return 1;
     }
-    return MMUWrite16(mmu, imm16, cpu->sp);
+    if (CPUWriteI8(mmu, imm16, cpu->s)) {
+        return 1;
+    }
+    if (CPUWriteI8(mmu, imm16++, cpu->p)) {
+        return 1;
+    }
+    return 0;
 }
 
 int INC_R16(struct CPU *cpu, struct MMU *mmu) {
+    tickCount += 4;
     uint16_t *r16 = DecodeR16(cpu);
     uint16_t value = *r16;
     value = (value + 1) & 0xffff;
@@ -170,6 +196,7 @@ int INC_R16(struct CPU *cpu, struct MMU *mmu) {
 }
 
 int DEC_R16(struct CPU *cpu, struct MMU *mmu) {
+    tickCount += 4;
     uint16_t *r16 = DecodeR16(cpu);
     uint16_t value = *r16;
     value = (value - 1) & 0xffff;
@@ -186,9 +213,9 @@ int ADD_HL_R16(struct CPU *cpu, struct MMU *mmu) {
 int INC_R8(struct CPU *cpu, struct MMU *mmu) {
     if (((opcode >> 3) & 0x07) == 0x6) {
         uint8_t value;
-        MMURead8(mmu, cpu->hl, &value);
+        CPUReadI8(mmu, cpu->hl, &value);
         value = RegisterINC(cpu, value);
-        MMUWrite8(mmu, cpu->hl, value);
+        CPUWriteI8(mmu, cpu->hl, value);
     } else {
         uint8_t *r8 = DecodeR8(cpu);
         uint8_t value = RegisterINC(cpu, *r8);
@@ -200,11 +227,11 @@ int INC_R8(struct CPU *cpu, struct MMU *mmu) {
 int DEC_R8(struct CPU *cpu, struct MMU *mmu) {
     if (((opcode >> 3) & 0x07) == 0x6) {
         uint8_t value;
-        if (MMURead8(mmu, cpu->hl, &value)) {
+        if (CPUReadI8(mmu, cpu->hl, &value)) {
             return 1;
         }
         value = RegisterDEC(cpu, value);
-        if (MMUWrite8(mmu, cpu->hl, value)) {
+        if (CPUWriteI8(mmu, cpu->hl, value)) {
             return 1;
         }
     } else {
@@ -221,7 +248,7 @@ int LD_R8_IMM8(struct CPU *cpu, struct MMU *mmu) {
         if (CPUReadNextI8(cpu, mmu, &value)) {
             return 1;
         }
-        if (MMUWrite8(mmu, cpu->hl, value)) {
+        if (CPUWriteI8(mmu, cpu->hl, value)) {
             return 1;
         }
     } else {
@@ -364,6 +391,7 @@ int JR_IMM8(struct CPU *cpu, struct MMU *mmu) {
     if (CPUReadNextI8(cpu, mmu, &i8)) {
         return 1;
     }
+    tickCount += 4;
     uint16_t pc = cpu->pc;
     pc += (int8_t)(i8);
     cpu->pc = pc;
@@ -403,7 +431,7 @@ int HALT(struct CPU *cpu, struct MMU *mmu) {
 int LD_R8_R8(struct CPU *cpu, struct MMU *mmu) {
     uint8_t value;
     if ((opcode & 0x07) == 0x06) {
-        if (MMURead8(mmu, cpu->hl, &value)) {
+        if (CPUReadI8(mmu, cpu->hl, &value)) {
             return 1;
         }
     } else {
@@ -412,7 +440,7 @@ int LD_R8_R8(struct CPU *cpu, struct MMU *mmu) {
     }
 
     if (((opcode >> 3) & 0x07) == 0x06) {
-        if (MMUWrite8(mmu, cpu->hl, value)) {
+        if (CPUWriteI8(mmu, cpu->hl, value)) {
             return 1;
         }
     } else {
@@ -546,7 +574,7 @@ int Opcode_A_R8(struct CPU *cpu, struct MMU *mmu) {
     if (r8) {
         value = *r8;
     } else {
-        if (MMURead8(mmu, cpu->hl, &value)) {
+        if (CPUReadI8(mmu, cpu->hl, &value)) {
             return 1;
         }
     }
@@ -631,7 +659,7 @@ int CP_A_IMM8(struct CPU *cpu, struct MMU *mmu) {
 }
 
 int POPB(struct CPU *cpu, struct MMU *mmu, uint8_t *value) {
-    if (MMURead8(mmu, cpu->sp, value)) {
+    if (CPUReadI8(mmu, cpu->sp, value)) {
         return 1;
     }
     cpu->sp = (cpu->sp + 1) & 0xffff;
@@ -653,6 +681,7 @@ int POPW(struct CPU *cpu, struct MMU *mmu, uint16_t *value) {
 }
 
 int RET(struct CPU *cpu, struct MMU *mmu) {
+    tickCount += 4;
     return POPW(cpu, mmu, &cpu->pc);
 }
 
@@ -661,50 +690,282 @@ int RETi(struct CPU *cpu, struct MMU *mmu) {
 }
 
 int RET_COND(struct CPU *cpu, struct MMU *mmu) {
-    if (DecodeCond(cpu)) {
-        return RET(cpu, mmu);
+    tickCount += 4;
+    return DecodeCond(cpu) ? RET(cpu, mmu) : 0;
+}
+
+int JP_IMM16(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t tmp;
+    if (CPUReadNextI16(cpu, mmu, &tmp)) {
+        return 1;
+    }
+    tickCount += 4;
+    cpu->pc = tmp;
+    return 0;
+}
+
+int JP_COND_IMM16(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t tmp;
+    return DecodeCond(cpu) ? JP_IMM16(cpu, mmu)
+                           : CPUReadNextI16(cpu, mmu, &tmp);
+}
+
+int JP_HL(struct CPU *cpu, struct MMU *mmu) {
+    cpu->pc = cpu->hl;
+    return 0;
+}
+
+int PUSHB(struct CPU *cpu, struct MMU *mmu, uint8_t value) {
+    tickCount += 4;
+    cpu->sp = (cpu->sp - 1) & 0xffff;
+    return CPUWriteI8(mmu, cpu->sp, value);
+}
+
+int PUSHW(struct CPU *cpu, struct MMU *mmu, uint16_t value) {
+    if (PUSHB(cpu, mmu, value >> 8)) {
+        return 1;
+    }
+    if (PUSHB(cpu, mmu, value & 0xff)) {
+        return 1;
     }
     return 0;
 }
 
-int JP_IMM16(struct CPU *cpu, struct MMU *mmu) {
-    return CPUReadNextI16(cpu, mmu, &cpu->pc);
+int RST(struct CPU *cpu, struct MMU *mmu, uint16_t target) {
+    if (PUSHW(cpu, mmu, cpu->pc)) {
+        return 1;
+    }
+    cpu->pc = target;
+    return 0;
 }
 
-int JP_COND_IMM16(struct CPU *cpu, struct MMU *mmu) {
-    if (DecodeCond(cpu)) {
-        return JP_IMM16(cpu, mmu);
-    } else {
-        uint16_t tmp;
-        return CPUReadNextI16(cpu, mmu, &tmp);
+int CALL_IMM16(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t i16;
+    if (CPUReadNextI16(cpu, mmu, &i16)) {
+        return 1;
+    }
+    tickCount += 4;
+    cpu->sp--;
+    return RST(cpu, mmu, i16);
+}
+
+int CALL_COND_IMM16(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t tmp;
+    return DecodeCond(cpu) ? CALL_IMM16(cpu, mmu)
+                           : CPUReadNextI16(cpu, mmu, &tmp);
+}
+
+int RST_TGT3(struct CPU *cpu, struct MMU *mmu) {
+    tickCount += 4;
+    static uint16_t address[] = {0x00, 0x08, 0x10, 0x18,
+                                 0x20, 0x28, 0x30, 0x38};
+    uint8_t index = (opcode & 0x38) >> 3;
+    return RST(cpu, mmu, address[index]);
+}
+
+uint16_t *DecodeR16skt(struct CPU *cpu) {
+    switch (opcode & 0x30) {
+    case 0x00:
+        return &cpu->bc;
+        break;
+    case 0x10:
+        return &cpu->de;
+        break;
+    case 0x20:
+        return &cpu->hl;
+        break;
+    default:
+        return &cpu->af;
+        break;
     }
 }
 
+int POP_R16stk(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t *r16 = DecodeR16skt(cpu);
+    if (r16 == &cpu->af) {
+        uint8_t value;
+        if (POPB(cpu, mmu, &value)) {
+            return 1;
+        }
+        cpu->f = value & 0xf0;
+        /* Restore flags from memory (low 4 bits are ignored) */
+        cpu->f_z = cpu->fz;
+        cpu->f_n = cpu->fn;
+        cpu->f_h = cpu->fh;
+        cpu->f_c = cpu->fc;
+
+        if (POPB(cpu, mmu, &cpu->a)) {
+            return 1;
+        }
+        return 0;
+    } else {
+        return POPW(cpu, mmu, r16);
+    }
+}
+
+int PUSH_R16stk(struct CPU *cpu, struct MMU *mmu) {
+    tickCount += 4;
+    uint16_t *r16 = DecodeR16skt(cpu);
+    if (r16 == &cpu->af) {
+        if (PUSHB(cpu, mmu, cpu->a)) {
+            return 1;
+        }
+
+        cpu->fc = cpu->f_c;
+        cpu->fh = cpu->f_h;
+        cpu->fn = cpu->f_n;
+        cpu->fz = cpu->f_z;
+        if (PUSHB(cpu, mmu, cpu->f)) {
+            return 1;
+        }
+        return 0;
+    } else {
+        return PUSHW(cpu, mmu, *r16);
+    }
+}
+
+uint8_t cbOpcode;
+int (*cpuCBInstructions[NUM_INSTRUCTION])(struct CPU *, struct MMU *);
+
+int CB(struct CPU *cpu, struct MMU *mmu) {
+    if (CPUReadNextI8(cpu, mmu, &cbOpcode)) {
+        return 1;
+    }
+    tickCount += 4;
+    return cpuCBInstructions[cbOpcode](cpu, mmu);
+}
+
+int LDH_imm8_A(struct CPU *cpu, struct MMU *mmu) {
+    uint8_t value;
+    if (CPUReadNextI8(cpu, mmu, &value)) {
+        return 1;
+    }
+    uint16_t addr = 0xff00 | value;
+    return CPUWriteI8(mmu, addr, cpu->a);
+}
+
+int LDH_MemC_A(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t addr = 0xff00 | cpu->c;
+    return CPUWriteI8(mmu, addr, cpu->a);
+}
+
+int ADD_SP_si8(struct CPU *cpu, struct MMU *mmu, uint16_t *value) {
+    uint8_t tmp;
+    if (CPUReadNextI8(cpu, mmu, &tmp)) {
+        return 1;
+    }
+    tickCount += 4;
+    int8_t i8 = (int8_t)tmp;
+    int32_t r = (uint32_t)cpu->sp;
+    *value = (uint16_t)(r += i8);
+
+    cpu->f_z = false;
+    cpu->f_n = false;
+    cpu->f_h = (cpu->sp ^ i8 ^ r) & 0x10;
+    cpu->f_c = (cpu->sp ^ i8 ^ r) & 0x100;
+    return 0;
+}
+
+int ADD_SP_Imm8(struct CPU *cpu, struct MMU *mmu) {
+    tickCount += 4;
+    return ADD_SP_si8(cpu, mmu, &cpu->sp);
+}
+
+int LD_Imm16_A(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t addr;
+    if (CPUReadNextI16(cpu, mmu, &addr)) {
+        return 1;
+    }
+    CPUWriteI8(mmu, addr, cpu->a);
+    return 0;
+}
+
+int LDH_A_imm8(struct CPU *cpu, struct MMU *mmu) {
+    uint8_t value;
+    if (CPUReadNextI8(cpu, mmu, &value)) {
+        return 1;
+    }
+    uint16_t addr = 0xff00 | value;
+    return CPUReadI8(mmu, addr, &cpu->a);
+}
+
+int LDH_A_MemC(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t addr = 0xff00 | cpu->c;
+    return CPUReadI8(mmu, addr, &cpu->a);
+}
+
+int LD_HL_SP_ADD_Imm8(struct CPU *cpu, struct MMU *mmu) {
+    return ADD_SP_si8(cpu, mmu, &cpu->hl);
+}
+
+int LD_A_imm16(struct CPU *cpu, struct MMU *mmu) {
+    uint16_t addr;
+    if (CPUReadNextI16(cpu, mmu, &addr)) {
+        return 1;
+    }
+    return CPUReadI8(mmu, addr, &cpu->a);
+}
+
+int LD_SP_HL(struct CPU *cpu, struct MMU *mmu) {
+    cpu->sp = cpu->hl;
+    return 0;
+}
+
+int DI(struct CPU *cpu, struct MMU *mmu) {
+    return 0;
+}
+
+int EI(struct CPU *cpu, struct MMU *mmu) {
+    return 0;
+}
+
 void InitInstructionFixed() {
-    cpuInstruction[0x00] = NOP;
-    cpuInstruction[0x08] = LD_IMM16_SP;
-    cpuInstruction[0x07] = RLCA;
-    cpuInstruction[0x0f] = RRCA;
-    cpuInstruction[0x17] = RLA;
-    cpuInstruction[0x1f] = RRA;
-    cpuInstruction[0x27] = DAA;
-    cpuInstruction[0x2f] = CPL;
-    cpuInstruction[0x37] = SCF;
-    cpuInstruction[0x3f] = CCF;
-    cpuInstruction[0x18] = JR_IMM8;
-    cpuInstruction[0x10] = STOP;
+    cpuInstructions[0x00] = NOP;
+    cpuInstructions[0x08] = LD_IMM16_SP;
+    cpuInstructions[0x07] = RLCA;
+    cpuInstructions[0x0f] = RRCA;
+    cpuInstructions[0x17] = RLA;
+    cpuInstructions[0x1f] = RRA;
+    cpuInstructions[0x27] = DAA;
+    cpuInstructions[0x2f] = CPL;
+    cpuInstructions[0x37] = SCF;
+    cpuInstructions[0x3f] = CCF;
+    cpuInstructions[0x18] = JR_IMM8;
+    cpuInstructions[0x10] = STOP;
 
-    cpuInstruction[0xc6] = ADD_A_IMM8;
-    cpuInstruction[0xce] = ADC_A_IMM8;
-    cpuInstruction[0xd6] = SUB_A_IMM8;
-    cpuInstruction[0xde] = SBC_A_IMM8;
-    cpuInstruction[0xe6] = AND_A_IMM8;
-    cpuInstruction[0xee] = XOR_A_IMM8;
-    cpuInstruction[0xf6] = OR_A_IMM8;
-    cpuInstruction[0xfe] = CP_A_IMM8;
+    cpuInstructions[0x76] = HALT;
 
-    cpuInstruction[0xc9] = RET;
-    cpuInstruction[0xd9] = RETi;
+    cpuInstructions[0xc6] = ADD_A_IMM8;
+    cpuInstructions[0xce] = ADC_A_IMM8;
+    cpuInstructions[0xd6] = SUB_A_IMM8;
+    cpuInstructions[0xde] = SBC_A_IMM8;
+    cpuInstructions[0xe6] = AND_A_IMM8;
+    cpuInstructions[0xee] = XOR_A_IMM8;
+    cpuInstructions[0xf6] = OR_A_IMM8;
+    cpuInstructions[0xfe] = CP_A_IMM8;
+
+    cpuInstructions[0xc9] = RET;
+    cpuInstructions[0xd9] = RETi;
+
+    cpuInstructions[0xc3] = JP_IMM16;
+    cpuInstructions[0xe9] = JP_HL;
+
+    cpuInstructions[0xcd] = CALL_IMM16;
+
+    cpuInstructions[0xcb] = CB;
+
+    cpuInstructions[0xe0] = LDH_imm8_A;
+    cpuInstructions[0xe2] = LDH_MemC_A;
+    cpuInstructions[0xe8] = ADD_SP_Imm8;
+    cpuInstructions[0xea] = LD_Imm16_A;
+
+    cpuInstructions[0xf0] = LDH_A_imm8;
+    cpuInstructions[0xf2] = LDH_A_MemC;
+    cpuInstructions[0xf3] = DI;
+    cpuInstructions[0xf8] = LD_HL_SP_ADD_Imm8;
+    cpuInstructions[0xf9] = LD_SP_HL;
+    cpuInstructions[0xfa] = LD_A_imm16;
+    cpuInstructions[0xfb] = EI;
 }
 
 void InitInstruction() {
@@ -716,67 +977,80 @@ void InitInstruction() {
         if (blockId == BLOCK_0) {
             tmp = index & 0x0f;
             if (tmp == 0x01) {
-                cpuInstruction[index] = LD_R16_IMM16;
+                cpuInstructions[index] = LD_R16_IMM16;
                 continue;
             }
             if (tmp == 0x20) {
-                cpuInstruction[index] = LD_R16MEM_A;
+                cpuInstructions[index] = LD_R16MEM_A;
                 continue;
             }
             if (tmp == 0xa0) {
-                cpuInstruction[index] = LD_A_R16MEM;
+                cpuInstructions[index] = LD_A_R16MEM;
                 continue;
             }
             if (tmp == 0x03) {
-                cpuInstruction[index] = INC_R16;
+                cpuInstructions[index] = INC_R16;
                 continue;
             }
             if (tmp == 0x0b) {
-                cpuInstruction[index] = DEC_R16;
+                cpuInstructions[index] = DEC_R16;
                 continue;
             }
             if (tmp == 0x09) {
-                cpuInstruction[index] = ADD_HL_R16;
+                cpuInstructions[index] = ADD_HL_R16;
                 continue;
             }
             tmp = index & 0x07;
             if (tmp == 0x04) {
-                cpuInstruction[index] = INC_R8;
+                cpuInstructions[index] = INC_R8;
                 continue;
             }
             if (tmp == 0x05) {
-                cpuInstruction[index] = DEC_R8;
+                cpuInstructions[index] = DEC_R8;
                 continue;
             }
             if (tmp == 0x06) {
-                cpuInstruction[index] = LD_R8_IMM8;
+                cpuInstructions[index] = LD_R8_IMM8;
                 continue;
             }
             if (tmp == 0x20) {
-                cpuInstruction[index] = JR_COND_IMM8;
+                cpuInstructions[index] = JR_COND_IMM8;
                 continue;
             }
         } else if (blockId == BLOCK_1) {
-            if (index == 0x76) {
-                cpuInstruction[index] = HALT;
-                continue;
-            }
             tmp = index & 0xc0;
             if (tmp == 0x40) {
-                cpuInstruction[index] = LD_R8_R8;
+                cpuInstructions[index] = LD_R8_R8;
                 continue;
             }
         } else if (blockId == BLOCK_2) {
-            cpuInstruction[index] = Opcode_A_R8;
+            cpuInstructions[index] = Opcode_A_R8;
             continue;
         } else if (blockId == BLOCK_3) {
             tmp = index & 0xe7;
             if (tmp == 0xc0) {
-                cpuInstruction[index] = RET_COND;
+                cpuInstructions[index] = RET_COND;
                 continue;
             }
             if (tmp == 0xc2) {
-                cpuInstruction[index] = JP_COND_IMM16;
+                cpuInstructions[index] = JP_COND_IMM16;
+                continue;
+            }
+            if (tmp == 0xc4) {
+                cpuInstructions[index] = CALL_COND_IMM16;
+                continue;
+            }
+            if (tmp == 0xc7) {
+                cpuInstructions[index] = RST_TGT3;
+                continue;
+            }
+            tmp = index & 0xcf;
+            if (tmp == 0xc1) {
+                cpuInstructions[index] = POP_R16stk;
+                continue;
+            }
+            if (tmp == 0xc5) {
+                cpuInstructions[index] = PUSH_R16stk;
                 continue;
             }
         }
@@ -785,16 +1059,214 @@ void InitInstruction() {
     InitInstructionFixed();
 }
 
+uint8_t *DecodeCBOperand(struct CPU *cpu) {
+    switch (cbOpcode & 0x07) {
+    case 0x00:
+        return &cpu->b;
+        break;
+    case 0x01:
+        return &cpu->c;
+        break;
+    case 0x02:
+        return &cpu->d;
+        break;
+    case 0x03:
+        return &cpu->e;
+        break;
+    case 0x04:
+        return &cpu->h;
+        break;
+    case 0x05:
+        return &cpu->l;
+        break;
+    case 0x06: // HL
+        return NULL;
+        break;
+    default: // case 0x07:
+        return &cpu->a;
+    }
+}
+
+void CBRLCSetFlags(struct CPU *cpu, uint8_t *v) {
+    uint8_t c = *v >> 7;
+    *v = (*v << 1) | c;
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = c;
+}
+
+void CBRRCSetFlags(struct CPU *cpu, uint8_t *v) {
+    uint8_t c = *v & 1;
+    *v = (*v >> 1) | (c << 7);
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = c;
+}
+
+void CBRLSetFlags(struct CPU *cpu, uint8_t *v) {
+    bool new_c = *v >> 7;
+    *v = (*v << 1) | (uint8_t)cpu->f_c;
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = new_c;
+}
+
+void CBRRSetFlags(struct CPU *cpu, uint8_t *v) {
+    bool new_c = *v & 1;
+    uint8_t old_c = cpu->f_c;
+    *v = (*v >> 1) | (old_c << 7);
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = new_c;
+}
+
+void CBSLASetFlags(struct CPU *cpu, uint8_t *v) {
+    bool c = *v >> 7;
+    *v = *v << 1;
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = c;
+}
+
+void CBSRASetFlags(struct CPU *cpu, uint8_t *v) {
+    bool c = *v & 1;
+    *v = (*v >> 1) | (*v & 0x80);
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = c;
+}
+
+void CBSWAPSetFlags(struct CPU *cpu, uint8_t *v) {
+    *v = ((*v << 4) | (*v >> 4)) & 0xff;
+    cpu->f_z = (*v == 0);
+    cpu->f_h = false;
+    cpu->f_c = false;
+}
+
+void CBSRLSetFlags(struct CPU *cpu, uint8_t *v) {
+    bool c = *v & 1;
+    *v = *v >> 1;
+    cpu->f_z = (*v == 0);
+    cpu->f_n = false;
+    cpu->f_h = false;
+    cpu->f_c = c;
+}
+
+int CPU_CB_R8(struct CPU *cpu, struct MMU *mmu) {
+    void (*cbInstruction)(struct CPU *, uint8_t *) = NULL;
+    switch (cbOpcode & 0xf8) {
+    case 0x00:
+        cbInstruction = CBRLCSetFlags;
+        break;
+    case 0x08:
+        cbInstruction = CBRRCSetFlags;
+        break;
+    case 0x10:
+        cbInstruction = CBRLSetFlags;
+        break;
+    case 0x18:
+        cbInstruction = CBRRSetFlags;
+        break;
+    case 0x20:
+        cbInstruction = CBSLASetFlags;
+        break;
+    case 0x28:
+        cbInstruction = CBSRASetFlags;
+        break;
+    case 0x30:
+        cbInstruction = CBSWAPSetFlags;
+        break;
+    default: // 0x38
+        cbInstruction = CBSRLSetFlags;
+        break;
+    }
+    uint8_t *r8 = DecodeCBOperand(cpu);
+    if (r8) {
+        cbInstruction(cpu, r8);
+        return 0;
+    } else {
+        uint8_t value;
+        if (CPUReadI8(mmu, cpu->hl, &value)) {
+            return 1;
+        }
+        cbInstruction(cpu, &value);
+        return CPUWriteI8(mmu, cpu->hl, value);
+    }
+}
+
+void BitSetFlags(struct CPU *cpu, uint8_t *v, uint8_t bit) {
+    bool set = *v & (1U << bit);
+    cpu->f_z = !set;
+    cpu->f_n = false;
+    cpu->f_h = true;
+}
+
+void ResSetFlags(struct CPU *, uint8_t *v, uint8_t bit) {
+    *v = *v & ~(1U << bit);
+}
+
+void SetSetFlags(struct CPU *, uint8_t *v, uint8_t bit) {
+    *v = *v | (1U << bit);
+}
+
+int CPU_CB_BIT(struct CPU *cpu, struct MMU *mmu) {
+    void (*cbInstructionBit)(struct CPU *, uint8_t *, uint8_t) = NULL;
+    switch (cbOpcode & 0xc0) {
+    case 0x40:
+        cbInstructionBit = BitSetFlags;
+        break;
+    case 0xb8:
+        cbInstructionBit = ResSetFlags;
+        break;
+    default: // 0xc0:
+        cbInstructionBit = SetSetFlags;
+        break;
+    }
+    uint8_t bit = (cbOpcode >> 3) & 0x07;
+    uint8_t *r8 = DecodeCBOperand(cpu);
+    if (r8) {
+        cbInstructionBit(cpu, r8, bit);
+        return 0;
+    } else {
+        uint8_t value;
+        if (CPUReadI8(mmu, cpu->hl, &value)) {
+            return 1;
+        }
+        cbInstructionBit(cpu, &value, bit);
+        return CPUWriteI8(mmu, cpu->hl, value);
+    }
+}
+
+void InitCBInstruction() {
+    for (size_t indexOpcodeCB = 0; indexOpcodeCB < 0x100; indexOpcodeCB++) {
+        if ((indexOpcodeCB & 0xc0) == 0x00) {
+            cpuCBInstructions[indexOpcodeCB] = CPU_CB_R8;
+        } else {
+            cpuCBInstructions[indexOpcodeCB] = CPU_CB_BIT;
+        }
+    }
+}
+
 int InitCPU(struct CPU *cpu) {
     InitInstruction();
+    InitCBInstruction();
     cpu->pc = 0x00;
     return 0;
 }
 
-int CPUTick(struct CPU *cpu, struct MMU *mmu) {
-    if (MMURead8(mmu, cpu->pc, &opcode)) {
+int CPUTick(struct CPU *cpu, struct MMU *mmu, size_t *numTick) {
+    tickCount = 0;
+    if (CPUReadI8(mmu, cpu->pc, &opcode)) {
         return 1;
     }
     cpu->pc++;
-    return cpuInstruction[opcode](cpu, mmu);
+    int ret = cpuInstructions[opcode](cpu, mmu);
+    *numTick = tickCount;
+    return ret;
 }

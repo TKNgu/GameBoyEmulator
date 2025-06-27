@@ -2,6 +2,7 @@
 #define CPU_H
 
 #include <stdint.h>
+#include <time.h>
 
 #include "MMU.h"
 
@@ -63,6 +64,6 @@ struct CPU {
 };
 
 int InitCPU(struct CPU *cpu);
-int CPUTick(struct CPU *cpu, struct MMU *mmu);
+int CPUTick(struct CPU *cpu, struct MMU *mmu, size_t *numTick);
 
 #endif
