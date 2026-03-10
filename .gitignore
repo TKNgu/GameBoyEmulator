@@ -2,3 +2,5 @@ build/
 lib/
 data/
 .*
+.zig-cache/
+zig-out
