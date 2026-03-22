@@ -44,4 +44,9 @@ pub const Memory = struct {
     pub fn writeU8(memory: *Memory, address: u16, value: u8) void {
         memory.memory[address] = value;
     }
+
+    pub fn readI8(memory: *Memory, address: u16) i8 {
+        const value = memory.readU8(address);
+        return @bitCast(value);
+    }
 };

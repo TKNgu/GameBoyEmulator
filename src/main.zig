@@ -1,293 +1,364 @@
 const std = @import("std");
+const Register = @import("register.zig").Register;
 const Memory = @import("memory.zig").Memory;
+const flagsHelper = @import("flags_helper.zig");
+const opcodeHelper = @import("opcode_helper.zig");
 
-const CPU = extern union {
-    r16: extern struct {
-        AF: u16 = 0,
-        BC: u16 = 0,
-        DE: u16 = 0,
-        HL: u16 = 0,
-        SP: u16 = 0,
-        PC: u16 = 0,
-    },
-    r8: extern struct {
-        F: u8,
-        A: u8,
-        C: u8,
-        B: u8,
-        E: u8,
-        D: u8,
-        L: u8,
-        H: u8,
-        P: u8,
-        S: u8,
-        PCLo: u8,
-        PCHi: u8,
-    },
+const ALU = struct {
+    pub const Result = struct {
+        result: u8,
+        Z: bool,
+        N: bool,
+        H: bool,
+        C: bool,
+    };
 
-    pub fn zflag(self: *const CPU) bool {
-        return (self.r8.F & 0b10000000) == 0b1000000;
+    // ========================
+    // ADD (a + b)
+    // ========================
+    pub inline fn add(a: u8, b: u8) Result {
+        const sum16: u16 = @as(u16, a) + @as(u16, b);
+        const result: u8 = @truncate(sum16);
+
+        return .{
+            .result = result,
+            .Z = result == 0,
+            .N = false,
+            .H = ((a & 0x0F) + (b & 0x0F)) > 0x0F,
+            .C = sum16 > 0xFF,
+        };
     }
 
-    pub fn nflag(self: *const CPU) bool {
-        return (self.r8.F & 0b01000000) == 0b0100000;
+    // ========================
+    // ADC (a + b + carry)
+    // ========================
+    pub inline fn adc(a: u8, b: u8, c: bool) Result {
+        const carry: u1 = @intFromBool(c);
+
+        const sum16: u16 =
+            @as(u16, a) +
+            @as(u16, b) +
+            carry;
+
+        const result: u8 = @truncate(sum16);
+
+        return .{
+            .result = result,
+            .Z = result == 0,
+            .N = false,
+            .H = ((a & 0x0F) + (b & 0x0F) + carry) > 0x0F,
+            .C = sum16 > 0xFF,
+        };
     }
 
-    pub fn hflag(self: *const CPU) bool {
-        return (self.r8.F & 0b00100000) == 0b0010000;
+    // ========================
+    // SUB (a - b)
+    // ========================
+    pub inline fn sub(a: u8, b: u8) Result {
+        const result: u8 = a -% b;
+
+        return .{
+            .result = result,
+            .Z = result == 0,
+            .N = true,
+            .H = (a & 0x0F) < (b & 0x0F),
+            .C = a < b,
+        };
     }
 
-    pub fn cflag(self: *const CPU) bool {
-        return (self.r8.F & 0b00010000) == 0b0001000;
+    // ========================
+    // SBC (a - b - carry)
+    // ========================
+    pub inline fn sbc(a: u8, b: u8, c: bool) Result {
+        const carry: u1 = @intFromBool(c);
+
+        const result: u8 = a -% b -% carry;
+
+        return .{
+            .result = result,
+            .Z = result == 0,
+            .N = true,
+            .H = (a & 0x0F) < ((b & 0x0F) + carry),
+            .C = @as(u16, a) < (@as(u16, b) + carry),
+        };
     }
 
-    pub fn zflagOf(self: *CPU) void {
-        self.r8.F &= 0b01110000;
+    // ========================
+    // INC (a + 1)
+    // ⚠️ không update C
+    // ========================
+    pub inline fn inc(a: u8) Result {
+        const result: u8 = a +% 1;
+
+        return .{
+            .result = result,
+            .Z = result == 0,
+            .N = false,
+            .H = (a & 0x0F) == 0x0F,
+            .C = false, // caller phải giữ nguyên C
+        };
     }
 
-    pub fn zflagOn(self: *CPU) void {
-        self.r8.F |= 0b10000000;
-    }
+    // ========================
+    // DEC (a - 1)
+    // ⚠️ không update C
+    // ========================
+    pub inline fn dec(a: u8) Result {
+        const result: u8 = a -% 1;
 
-    pub fn setZ(self: *CPU, value: bool) void {
-        if (value) {
-            self.zflagOn();
-        } else {
-            self.zflagOf();
-        }
-    }
-
-    pub fn nflagOf(self: *CPU) void {
-        self.r8.F &= 0b10110000;
-    }
-
-    pub fn nflagOn(self: *CPU) void {
-        self.r8.F |= 0b01000000;
-    }
-
-    pub fn setN(self: *CPU, value: bool) void {
-        if (value) {
-            self.nflagOn();
-        } else {
-            self.nflagOf();
-        }
-    }
-
-    pub fn hflagOf(self: *CPU) void {
-        self.r8.F &= 0b11010000;
-    }
-
-    pub fn hflagOn(self: *CPU) void {
-        self.r8.F |= 0b00100000;
-    }
-
-    pub fn setH(self: *CPU, value: bool) void {
-        if (value) {
-            self.hflagOn();
-        } else {
-            self.hflagOf();
-        }
-    }
-
-    pub fn cflagOf(self: *CPU) void {
-        self.r8.F &= 0b11100000;
-    }
-
-    pub fn cflagOn(self: *CPU) void {
-        self.r8.F |= 0b00010000;
-    }
-
-    pub fn setC(self: *CPU, value: bool) void {
-        if (value) {
-            self.cflagOn();
-        } else {
-            self.cflagOf();
-        }
+        return .{
+            .result = result,
+            .Z = result == 0,
+            .N = true,
+            .H = (a & 0x0F) == 0x00,
+            .C = false, // caller giữ nguyên
+        };
     }
 };
 
-const Call = *const fn (cpu: *CPU, memory: *Memory) void;
+const Opcode = *const fn (register: *Register, memory: *Memory) void;
 
-fn nop(_: *CPU, _: *Memory) void {
-    std.debug.print("Nop\n", .{});
+fn fetchCycle(register: *Register, memory: *Memory) u8 {
+    const opcode = memory.readU8(register.r16.PC);
+    register.r16.PC += 1;
+    return opcode;
 }
 
-fn undefinedCall(_: *CPU, _: *Memory) void {
-    std.debug.print("Undefine\n", .{});
-    std.posix.exit(0);
-}
-
-fn getR8(cpu: *CPU, comptime opcode: u8) *u8 {
-    const r: u3 = @intCast((opcode >> 3) & 0b111);
-    return switch (r) {
-        0 => &cpu.r8.B,
-        1 => &cpu.r8.C,
-        2 => &cpu.r8.D,
-        3 => &cpu.r8.E,
-        4 => &cpu.r8.H,
-        5 => &cpu.r8.L,
-        6 => undefined,
-        7 => &cpu.r8.A,
-    };
-}
-
-fn getR16(cpu: *CPU, comptime opcode: u8) *u16 {
-    const rr: u2 = @intCast((opcode >> 4) & 0b11);
-    return switch (rr) {
-        0 => &cpu.r16.BC,
-        1 => &cpu.r16.DE,
-        2 => &cpu.r16.HL,
-        3 => &cpu.r16.SP,
-    };
-}
-
-fn getR16Mem(cpu: *CPU, comptime opcode: u8) *u16 {
-    const rr: u2 = @intCast((opcode >> 4) & 0b11);
-    return switch (rr) {
-        0 => &cpu.r16.BC,
-        1 => &cpu.r16.DE,
-        2 => &cpu.r16.HL,
-        3 => &cpu.r16.HL,
-    };
-}
-
-fn readImm16(cpu: *CPU, memory: *Memory) u16 {
-    cpu.r16.PC += 1;
-    const lo = memory.readU8(cpu.r16.PC);
-    cpu.r16.PC += 1;
-    const hi: u16 = @intCast(memory.readU8(cpu.r16.PC));
-    const imm16 = lo | (hi << 8);
-    return imm16;
-}
-
-fn updateHL(cpu: *CPU, comptime opcode: u8) void {
-    const rr = (opcode >> 4) & 0b11;
-
-    if (rr == 2) cpu.r16.HL += 1;
-    if (rr == 3) cpu.r16.HL -= 1;
-}
-
-fn makeFnBlock0(opcode: u8) Call {
-    return switch (opcode & 0b00001111) {
-        0b0000 => nop,
-        0b0001 => struct {
-            fn ldR16Imm16(cpu: *CPU, memory: *Memory) void {
-                const r16 = getR16(cpu, opcode);
-                r16.* = readImm16(cpu, memory);
-            }
-        }.ldR16Imm16,
-        0b0010 => struct {
-            fn ldR16memA(cpu: *CPU, memory: *Memory) void {
-                const r16Mem = getR16Mem(cpu, opcode);
-                memory.writeU8(r16Mem.*, cpu.r8.A);
-                updateHL(cpu, opcode);
-            }
-        }.ldR16memA,
-        0b1010 => struct {
-            fn ldAR16mem(cpu: *CPU, memory: *Memory) void {
-                const r16Mem = getR16Mem(cpu, opcode);
-                cpu.r8.A = memory.readU8(r16Mem.*);
-                updateHL(cpu, opcode);
-            }
-        }.ldAR16mem,
-        0b1000 => struct {
-            fn ldImm16SP(cpu: *CPU, memory: *Memory) void {
-                const imm16 = readImm16(cpu, memory);
-                memory.writeU8(imm16, cpu.r8.P);
-                memory.writeU8(imm16 + 1, cpu.r8.S);
-            }
-        }.ldImm16SP,
-        0b0011 => struct {
-            fn incR16(cpu: *CPU, _: *Memory) void {
-                const r16 = getR16(cpu, opcode);
-                r16.* += 1;
-            }
-        }.incR16,
-        0b1011 => struct {
-            fn decR16(cpu: *CPU, _: *Memory) void {
-                const r16 = getR16(cpu, opcode);
-                r16.* -= 1;
-            }
-        }.decR16,
-        0b1001 => struct {
-            fn addHLR16(cpu: *CPU, _: *Memory) void {
-                const r16 = getR16(cpu, opcode).*;
-                const sum: u32 = @as(u32, @intCast(cpu.r16.HL)) +
-                    @as(u32, @intCast(r16));
-                cpu.r16.HL = @as(u16, @intCast(sum));
-                cpu.r8.F &= 0b10010000;
-                if (((cpu.r16.HL & 0xfff) + (r16 & 0xfff)) > 0xfff) {
-                    cpu.r8.F |= 0x20;
-                }
-                if (sum > 0xffff) {
-                    cpu.r8.F |= 0x10;
-                }
-            }
-        }.addHLR16,
-        else => {
-            return switch (opcode & 0b00000111) {
-                0b100 => struct {
-                    fn incR8(cpu: *CPU, _: *Memory) void {
-                        const r8 = getR8(cpu, opcode);
-                        const old = r8.*;
-                        r8.* += 1;
-                        cpu.setZ(r8.* == 0);
-                        cpu.nflagOf();
-                        cpu.setH(((old & 0xF) + 1) > 0xF);
-                    }
-                }.incR8,
-                0b101 => struct {
-                    fn decR8(cpu: *CPU, _: *Memory) void {
-                        const r8 = getR8(cpu, opcode);
-                        const old = r8.*;
-                        r8.* -= 1;
-                        cpu.setZ(r8.* == 0);
-                        cpu.nflagOf();
-                        cpu.setH((old & 0xF) == 0);
-                    }
-                }.decR8,
-                0b110 => struct {
-                    fn ldR8Imm8(cpu: *CPU, memory: *Memory) void {
-                        const r8 = getR8(cpu, opcode);
-                        cpu.r16.PC += 1;
-                        r8.* = memory.readU8(cpu.r16.PC);
-                    }
-                }.ldR8Imm8,
-                else => undefinedCall,
-            };
+fn getR16Mem(register: *Register, index: u8) u16 {
+    const r16Mem: u2 = @truncate(index >> 4);
+    return switch (r16Mem) {
+        0b0 => register.r16.BC,
+        0b1 => register.r16.DE,
+        0b10 => HLP: {
+            const tmp = register.r16.HL;
+            register.r16.HL += 1;
+            break :HLP tmp;
+        },
+        0b11 => HLS: {
+            const tmp = register.r16.HL;
+            register.r16.HL -= 1;
+            break :HLS tmp;
         },
     };
 }
 
-fn makeFn(opcode: u8) Call {
-    switch (opcode & 0b11000000) {
-        0b00000000 => return makeFnBlock0(opcode),
-        else => return undefinedCall,
+fn readU16(memory: *Memory, register: *Register) u16 {
+    const lo: u16 = @intCast(memory.readU8(register.r16.PC));
+    register.r16.PC += 1;
+    const hi: u16 = @intCast(memory.readU8(register.r16.PC));
+    register.r16.PC += 1;
+    return (hi << 8) | lo;
+}
+
+fn getR16(register: *Register, comptime index: u8) *u16 {
+    const r16Code: u2 = @truncate(index >> 4);
+    return switch (r16Code) {
+        0b0 => &register.r16.BC,
+        0b1 => &register.r16.DE,
+        0b10 => &register.r16.HL,
+        0b11 => &register.r16.SP,
+    };
+}
+
+fn getR8(register: *Register, comptime index: u8) ?*u8 {
+    const r8Code = @as(u3, (index >> 3) & 0b111);
+    return switch (r8Code) {
+        0b0 => return &register.r8.B,
+        0b1 => return &register.r8.C,
+        0b10 => return &register.r8.D,
+        0b11 => return &register.r8.E,
+        0b100 => return &register.r8.H,
+        0b101 => return &register.r8.L,
+        0b110 => return null,
+        0b111 => return &register.r8.A,
+    };
+}
+
+fn nop(_: *Register, _: *Memory) void {}
+
+fn jumpImm8(register: *Register, memory: *Memory) void {
+    const offset = memory.readI8(register.r16.PC);
+    register.r16.PC = @intCast(@as(i32, register.r16.PC) + offset);
+}
+
+fn buildInstructionBlock0(index: u8) Opcode {
+    if (index == 0x00) {
+        return nop;
+    } else if ((index & 0b1111) == 0b1) {
+        return struct {
+            fn ldR16Imm16(register: *Register, memory: *Memory) void {
+                const value = readU16(memory, register);
+                const r16 = getR16(register, index);
+                r16.* = value;
+            }
+        }.ldR16Imm16;
+    } else if ((index & 0b1111) == 0b10) {
+        return struct {
+            fn ldMemR16MemA(register: *Register, memory: *Memory) void {
+                const address = getR16Mem(register, index);
+                memory.writeU8(address, register.r8.A);
+            }
+        }.ldMemR16MemA;
+    } else if ((index & 0b1111) == 0b1010) {
+        return struct {
+            fn ldAMemR16Mem(register: *Register, memory: *Memory) void {
+                const address = getR16Mem(register, index);
+                register.r8.A = memory.readU8(address);
+            }
+        }.ldAMemR16Mem;
+    } else if (index == 0b1000) {
+        return struct {
+            fn ldMemImm16SP(register: *Register, memory: *Memory) void {
+                const address = readU16(memory, register);
+                memory.writeU8(address, register.r8.P);
+                memory.writeU8(address + 1, register.r8.S);
+            }
+        }.ldMemImm16SP;
+    } else if ((index & 0b111) == 0b11) {
+        return struct {
+            fn incdecR16(register: *Register, _: *Memory) void {
+                const tmp = getR16(register, index);
+                if ((index & 0b1000) == 0b1000) {
+                    tmp.* -= 1;
+                } else {
+                    tmp.* += 1;
+                }
+            }
+        }.incdecR16;
+    } else if ((index & 0b1111) == 0b1001) {
+        return struct {
+            fn addHLR16(register: *Register, _: *Memory) void {
+                const r16 = getR16(register, index).*;
+                const lo: u8 = @truncate(r16);
+                const hi: u8 = @truncate(r16 >> 8);
+                var result = ALU.add(register.r8.L, lo);
+                register.r8.L = result.result;
+                result = ALU.adc(register.r8.H, hi, result.C);
+                register.r8.H = result.result;
+                flagsHelper.setH(&register.r8.F, result.H);
+                flagsHelper.setC(&register.r8.F, result.C);
+            }
+        }.addHLR16;
+    } else if ((index & 0b110) == 0b100) {
+        return struct {
+            fn incdecR8(register: *Register, memory: *Memory) void {
+                const optionR8 = getR8(register, index);
+                const aluOpcode = index & 0b1;
+                if (optionR8) |r8| {
+                    const result = if (aluOpcode == 0b1)
+                        ALU.inc(r8.*)
+                    else
+                        ALU.dec(r8.*);
+                    r8.* = result.result;
+                    flagsHelper.setZ(&register.r8.F, result.Z);
+                    flagsHelper.nflagOf(&register.r8.F);
+                    flagsHelper.setH(&register.r8.F, result.H);
+                } else {
+                    const data = memory.readU8(register.r16.HL);
+                    const result = if (aluOpcode == 0b1)
+                        ALU.inc(data)
+                    else
+                        ALU.dec(data);
+                    memory.writeU8(register.r16.HL, result.result);
+                    flagsHelper.setZ(&register.r8.F, result.Z);
+                    flagsHelper.nflagOf(&register.r8.F);
+                    flagsHelper.setH(&register.r8.F, result.H);
+                }
+            }
+        }.incdecR8;
+    } else if ((index & 0b111) == 0b110) {
+        return struct {
+            fn ldR8Imm8(register: *Register, memory: *Memory) void {
+                const value = memory.readU8(register.r16.PC);
+                register.r16.PC += 1;
+                const optionR8 = getR8(register, index);
+                if (optionR8) |r8| {
+                    r8.* = value;
+                } else {
+                    memory.writeU8(register.r16.HL, value);
+                }
+            }
+        }.ldR8Imm8;
+    } else if ((index & 0b111) == 0b111) {
+        return struct {
+            fn bitOpcode(register: *Register, _: *Memory) void {
+                switch (@as(u3, @truncate(index >> 3))) {
+                    0b0 => opcodeHelper.rlca(&register.r8.A, &register.r8.F),
+                    0b1 => opcodeHelper.rrca(&register.r8.A, &register.r8.F),
+                    0b10 => opcodeHelper.rla(&register.r8.A, &register.r8.F),
+                    0b11 => opcodeHelper.rra(&register.r8.A, &register.r8.F),
+                    0b100 => opcodeHelper.daa(&register.r8.A, &register.r8.F),
+                    0b101 => opcodeHelper.cpl(&register.r8.A, &register.r8.F),
+                    0b110 => opcodeHelper.scf(&register.r8.F),
+                    0b111 => opcodeHelper.ccf(&register.r8.F),
+                }
+            }
+        }.bitOpcode;
+    } else if (index == 0b11000) {
+        return jumpImm8;
+    } else {
+        return struct {
+            fn undefinedOpcode(_: *Register, _: *Memory) void {
+                std.debug.panic("Undefined opcode 0x{X:02}\n", .{index});
+            }
+        }.undefinedOpcode;
     }
 }
 
-fn buildOpcodeTable() [256]Call {
-    var call: [256]Call = undefined;
-    for (0..256) |id| {
-        call[id] = makeFn(id);
+fn buildInstructionBlock1(index: u8) Opcode {
+    return struct {
+        fn undefinedOpcode(_: *Register, _: *Memory) void {
+            std.debug.print("Undefined opcode 0x{X:02}\n", .{index});
+            std.posix.exit(1);
+        }
+    }.undefinedOpcode;
+}
+
+fn buildInstructionBlock2(index: u8) Opcode {
+    return struct {
+        fn undefinedOpcode(_: *Register, _: *Memory) void {
+            std.debug.print("Undefined opcode 0x{X:02}\n", .{index});
+            std.posix.exit(1);
+        }
+    }.undefinedOpcode;
+}
+
+fn buildInstructionBlock3(index: u8) Opcode {
+    return struct {
+        fn undefinedOpcode(_: *Register, _: *Memory) void {
+            std.debug.print("Undefined opcode 0x{X:02}\n", .{index});
+            std.posix.exit(1);
+        }
+    }.undefinedOpcode;
+}
+
+fn buildInstructionSet() [256]Opcode {
+    var instructionSet: [256]Opcode = undefined;
+    for (0..256) |index| {
+        switch (@as(u2, @truncate(index >> 6))) {
+            0b0 => instructionSet[index] = buildInstructionBlock0(index),
+            0b1 => instructionSet[index] = buildInstructionBlock1(index),
+            0b10 => instructionSet[index] = buildInstructionBlock2(index),
+            0b11 => instructionSet[index] = buildInstructionBlock3(index),
+        }
     }
-    return call;
+    return instructionSet;
 }
 
 pub fn main() !void {
-    const call = comptime buildOpcodeTable();
+    const instructionSet: [256]Opcode = comptime buildInstructionSet();
 
     var memory: Memory = undefined;
     try memory.load("data/Tetris.gb");
 
-    var cpu = CPU{ .r16 = .{
-        .PC = 0x100,
-    } };
+    var register: Register = undefined;
+
+    // Init
+    register.r16.PC = 0x100;
+    var opcode = fetchCycle(&register, &memory);
 
     while (true) {
-        const opcode = memory.readU8(cpu.r16.PC);
-        std.debug.print("Opcode 0x{X:0>2}\n", .{opcode});
-        call[opcode](&cpu, &memory);
-        cpu.r16.PC += 1;
+        instructionSet[opcode](&register, &memory);
+        opcode = fetchCycle(&register, &memory);
     }
 }
